@@ -15,8 +15,8 @@ Achieves SNR of 301.50 dB — mathematically perfect reconstruction.
 ## Group Members
 
 - Krishna Maharajwala
-- Andre Tran
-- Chris [Last Name]
+- Anh Tran
+- Chris Bramley
 
 ## Method
 
