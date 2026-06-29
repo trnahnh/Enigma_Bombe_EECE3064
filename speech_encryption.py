@@ -37,31 +37,109 @@ def generate_test_signal(duration=5, sample_rate=16000):
 
 # ─────────────────────────────────────────────────────────────
 # STEP 2: ENCRYPT
+# Scramble only positive frequencies and mirror (conjugate symmetry).
+# This ensures IFFT produces a true real signal with no information loss.
 # ─────────────────────────────────────────────────────────────
 def encrypt(signal, key):
-    X = np.fft.fft(signal)                  # time → frequency domain
+    X = np.fft.fft(signal)
     N = len(X)
-    rng     = np.random.default_rng(key)
-    indices = rng.permutation(N)            # repeatable scramble pattern from key
-    X_scrambled = X[indices]                # rearrange frequency components
-    encrypted   = np.fft.ifft(X_scrambled).real   # back to time domain
-    return encrypted, indices
+    M = N // 2 - 1                          # number of positive freq bins to scramble
+
+    rng  = np.random.default_rng(key)
+    perm = rng.permutation(M)               # permutation of [0, 1, ..., M-1]
+
+    X_scrambled = X.copy()
+    X_scrambled[1:N//2] = X[perm + 1]      # rearrange positive frequencies
+    X_scrambled[N//2+1:] = np.conj(X_scrambled[1:N//2][::-1])  # mirror → real output
+
+    encrypted = np.fft.ifft(X_scrambled).real
+    return encrypted, perm
 
 
 # ─────────────────────────────────────────────────────────────
 # STEP 3: DECRYPT
 # ─────────────────────────────────────────────────────────────
-def decrypt(encrypted_signal, indices):
-    X_scrambled = np.fft.fft(encrypted_signal)
-    N = len(X_scrambled)
-    X_original = np.zeros(N, dtype=complex)
-    X_original[indices] = X_scrambled       # reverse the scrambling
-    decrypted = np.fft.ifft(X_original).real
+def decrypt(encrypted_signal, perm):
+    X_enc = np.fft.fft(encrypted_signal)
+    N     = len(X_enc)
+
+    inv_perm = np.argsort(perm)             # inverse permutation
+
+    X_dec = X_enc.copy()
+    X_dec[1:N//2] = X_enc[inv_perm + 1]    # restore original frequency order
+    X_dec[N//2+1:] = np.conj(X_dec[1:N//2][::-1])  # mirror
+
+    decrypted = np.fft.ifft(X_dec).real
     return decrypted
 
 
 # ─────────────────────────────────────────────────────────────
-# STEP 4: SAVE AUDIO
+# STEP 4: SNR CALCULATION
+# ─────────────────────────────────────────────────────────────
+def compute_snr(original, recovered):
+    min_len      = min(len(original), len(recovered))
+    original     = original[:min_len]
+    recovered    = recovered[:min_len]
+    noise        = original - recovered
+    signal_power = np.mean(original ** 2)
+    noise_power  = np.mean(noise ** 2)
+    if noise_power == 0:
+        return float('inf')
+    return 10 * np.log10(signal_power / noise_power)
+
+
+# ─────────────────────────────────────────────────────────────
+# STEP 5: WRONG KEY TEST
+# ─────────────────────────────────────────────────────────────
+def wrong_key_test(encrypted, correct_perm, wrong_key, sample_rate, output_dir):
+    N = len(encrypted)
+    M = N // 2 - 1
+
+    wrong_perm     = np.random.default_rng(wrong_key).permutation(M)
+    wrong_inv_perm = np.argsort(wrong_perm)
+
+    X_enc   = np.fft.fft(encrypted)
+    X_wrong = X_enc.copy()
+    X_wrong[1:N//2]  = X_enc[wrong_inv_perm + 1]
+    X_wrong[N//2+1:] = np.conj(X_wrong[1:N//2][::-1])
+    wrong_decrypted  = np.fft.ifft(X_wrong).real
+
+    save_audio(os.path.join(output_dir, "wrong_key_attempt.wav"), sample_rate, wrong_decrypted)
+
+    # Recompute correct decryption for plot
+    inv_perm   = np.argsort(correct_perm)
+    X_correct  = X_enc.copy()
+    X_correct[1:N//2]  = X_enc[inv_perm + 1]
+    X_correct[N//2+1:] = np.conj(X_correct[1:N//2][::-1])
+    correct_dec = np.fft.ifft(X_correct).real
+
+    t   = np.linspace(0, N / sample_rate, N)
+    fig, axes = plt.subplots(1, 2, figsize=(14, 4))
+    fig.suptitle("Decryption: Correct Key vs Wrong Key — Group 10",
+                 fontsize=13, fontweight="bold")
+
+    axes[0].plot(t, correct_dec, color="seagreen", linewidth=0.5)
+    axes[0].set_title("Correct Key — Recovered Speech")
+    axes[0].set_xlabel("Time (s)")
+    axes[0].set_ylabel("Amplitude")
+    axes[0].set_xlim([0, t[-1]])
+
+    axes[1].plot(t, wrong_decrypted, color="darkorange", linewidth=0.5)
+    axes[1].set_title("Wrong Key — Still Noise")
+    axes[1].set_xlabel("Time (s)")
+    axes[1].set_ylabel("Amplitude")
+    axes[1].set_xlim([0, t[-1]])
+
+    plt.tight_layout()
+    path = os.path.join(output_dir, "wrong_key_test.png")
+    plt.savefig(path, dpi=150, bbox_inches="tight")
+    plt.show()
+    print(f"Wrong key test plot saved → {path}")
+    print("Audio saved → wrong_key_attempt.wav  (should sound like noise)")
+
+
+# ─────────────────────────────────────────────────────────────
+# STEP 6: SAVE AUDIO
 # ─────────────────────────────────────────────────────────────
 def save_audio(filepath, sample_rate, signal):
     normalized = signal / np.max(np.abs(signal))
@@ -70,7 +148,7 @@ def save_audio(filepath, sample_rate, signal):
 
 
 # ─────────────────────────────────────────────────────────────
-# STEP 5: PLOT RESULTS
+# STEP 7: PLOT RESULTS
 # ─────────────────────────────────────────────────────────────
 def plot_results(sample_rate, original, encrypted, decrypted,
                  output_path="results.png"):
@@ -88,14 +166,12 @@ def plot_results(sample_rate, original, encrypted, decrypted,
     colors  = ["steelblue",   "crimson",      "seagreen"]
 
     for i, (sig, label, color) in enumerate(zip(signals, labels, colors)):
-        # Time-domain waveform
         axes[i][0].plot(t, sig, color=color, linewidth=0.5)
         axes[i][0].set_title(f"{label} Speech — Time Domain")
         axes[i][0].set_xlabel("Time (s)")
         axes[i][0].set_ylabel("Amplitude")
         axes[i][0].set_xlim([0, t[-1]])
 
-        # Frequency spectrum
         mag = np.abs(np.fft.fft(sig))[:half]
         axes[i][1].plot(freqs, mag, color=color, linewidth=0.5)
         axes[i][1].set_title(f"{label} Speech — Frequency Spectrum")
@@ -113,7 +189,6 @@ def plot_results(sample_rate, original, encrypted, decrypted,
 # MAIN
 # ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    # Load audio or fall back to test signal
     if os.path.exists(INPUT_FILE):
         sample_rate, original = load_audio(INPUT_FILE)
         print(f"Loaded: {INPUT_FILE}")
@@ -125,12 +200,21 @@ if __name__ == "__main__":
     print(f"Samples     : {len(original)}")
 
     # Encrypt
-    encrypted, scramble_indices = encrypt(original, KEY)
+    encrypted, perm = encrypt(original, KEY)
     print("Encryption complete.")
 
     # Decrypt
-    decrypted = decrypt(encrypted, scramble_indices)
+    decrypted = decrypt(encrypted, perm)
     print("Decryption complete.")
+
+    # SNR
+    snr = compute_snr(original, decrypted)
+    print(f"SNR (original vs decrypted) : {snr:.2f} dB")
+
+    # Wrong key test
+    WRONG_KEY = KEY + 1
+    print(f"\nRunning wrong key test (wrong key = {WRONG_KEY})...")
+    wrong_key_test(encrypted, perm, WRONG_KEY, sample_rate, OUTPUT_DIR)
 
     # Save audio files
     save_audio(os.path.join(OUTPUT_DIR, "original_speech_out.wav"), sample_rate, original)
@@ -138,6 +222,6 @@ if __name__ == "__main__":
     save_audio(os.path.join(OUTPUT_DIR, "decrypted_speech.wav"),    sample_rate, decrypted)
     print("Audio files saved: original_speech_out.wav, encrypted_speech.wav, decrypted_speech.wav")
 
-    # Plot and save
+    # Plot
     plot_results(sample_rate, original, encrypted, decrypted,
                  output_path=os.path.join(OUTPUT_DIR, "results.png"))
